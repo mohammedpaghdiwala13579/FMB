@@ -513,6 +513,21 @@
       flex-shrink: 0;
     }
 
+    /* ── HIGHLIGHTED MENU LINES (from Google Sheets cell colors) ── */
+    .menu-line {
+      display: block;
+      border-radius: 5px;
+      padding: 0 3px;
+      margin: 1px 0;
+      line-height: 1.4;
+    }
+    .menu-line.has-highlight {
+      padding: 1px 6px;
+      border-radius: 6px;
+      font-weight: 700;
+      /* background-color is set inline from the sheet's cell bg color */
+    }
+
     /* ── SPEAK BUTTON ── */
     .card-bottom-row {
       display: flex;
@@ -763,7 +778,8 @@
           month: row.month || '',
           date: row.date || '',
           menu: row.menu || '',
-          extra: row.extra || ''
+          extra: row.extra || '',
+          menuColors: Array.isArray(row.menuColors) ? row.menuColors : []
         }));
       }
       return [];
@@ -794,17 +810,20 @@
     currentFlipCard  = null;
   }
 
-  async function fetchNaturalSpeech(dayText, menuText) {
-    // Ask Claude to turn Banglish food names into a natural English sentence
+  async function fetchNaturalSpeech(dayText, dateText, menuText) {
+    // Ask Claude to turn Banglish food names into a natural spoken English sentence,
+    // including the day name and date so the listener knows which day's menu it is.
     const systemPrompt =
-      'You convert a Bengali food menu (written in Roman/English letters, called Banglish) ' +
-      'into a natural, clear English sentence suitable for text-to-speech. ' +
-      'Output only the final sentence. No explanation, no preamble, no markdown. ' +
-      'Example input: "Khichuri, Begun Bhaja, Doi" ' +
-      'Example output: "Today\'s menu includes khichdi — a comforting rice and lentil dish — fried eggplant, and yogurt." ' +
-      'Keep it warm and descriptive but concise, under 40 words.';
+      'You convert a Bengali tiffin menu (written in Roman/English letters, called Banglish) ' +
+      'into a single natural English sentence for text-to-speech. ' +
+      'Always begin with the day and date (e.g. "On Saturday, June 14th, ..."). ' +
+      'Then describe each dish warmly. ' +
+      'Output only the final sentence — no explanation, no preamble, no markdown. ' +
+      'Example input — Day: Saturday, Date: June 14, Menu: "Khichuri, Begun Bhaja, Doi" ' +
+      'Example output: "On Saturday, June 14th, the menu features khichdi — a comforting rice and lentil dish — crispy fried eggplant, and cool yogurt." ' +
+      'Keep it under 50 words.';
 
-    const userMsg = `Day: ${dayText}\nMenu: ${menuText}`;
+    const userMsg = `Day: ${dayText}\nDate: ${dateText || 'not specified'}\nMenu: ${menuText}`;
 
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -880,7 +899,7 @@
     utter.onerror = () => { clearInterval(nudge); stopSpeaking(); };
   }
 
-  async function handleSpeakTap(idx, dayText, menuRaw, btn, card) {
+  async function handleSpeakTap(idx, dayText, dateText, menuRaw, btn, card) {
     // If already speaking this card — stop
     if (card.classList.contains('speaking')) { stopSpeaking(); return; }
 
@@ -897,13 +916,14 @@
       if (speakCache[idx]) {
         naturalText = speakCache[idx];
       } else {
-        naturalText = await fetchNaturalSpeech(dayText, menuRaw);
+        naturalText = await fetchNaturalSpeech(dayText, dateText, menuRaw);
         speakCache[idx] = naturalText;
       }
     } catch (err) {
       console.warn('Claude API failed, using raw text:', err);
       // Graceful fallback: clean up the raw text as best we can
-      naturalText = `${dayText}'s menu: ${menuRaw.replace(/\n/g, ', ')}`;
+      const dateLabel = dateText ? ` ${dateText}` : '';
+      naturalText = `On ${dayText}${dateLabel}, the menu includes: ${menuRaw.replace(/\n/g, ', ')}`;
     }
 
     // Voices may not be loaded yet on first call (especially iOS)
@@ -932,17 +952,31 @@
           menuHtml = "Menu update soon",
           extraHtml = "Please check back later for delicious details.";
 
+      let menuColors = [];
       if (source) {
         dayVal   = (source.day   && source.day.trim())   ? source.day   : "—";
         monthVal = (source.month && source.month.trim()) ? source.month : "";
         dateVal  = (source.date  && source.date.trim())  ? source.date  : "";
         menuRaw  = (source.menu  && source.menu.trim())  ? source.menu  : "Fresh daily dish";
+        menuColors = Array.isArray(source.menuColors) ? source.menuColors : [];
         const rawExtra = (source.extra && source.extra.trim()) ? source.extra : "Prepared with authentic ingredients.";
-        menuHtml  = escapeWithBreaks(menuRaw);
+        // Build menuHtml: one .menu-line span per line, with inline bg color if highlighted
+        menuHtml = menuRaw.split('\n').map((line, li) => {
+          const safeLine = escapeText(line);
+          const color = (menuColors[li] || '').toString().trim().toLowerCase();
+          // Treat white (#ffffff / #fff) and empty as no highlight
+          const isWhite = !color || color === '#ffffff' || color === '#fff' || color === 'null';
+          if (!isWhite) {
+            // Slightly transparent so it looks like a highlight, not a solid block
+            return `<span class="menu-line has-highlight" style="background-color:${color};">${safeLine}</span>`;
+          }
+          return `<span class="menu-line">${safeLine}</span>`;
+        }).join('');
         extraHtml = escapeWithBreaks(rawExtra);
       } else {
         const genericDays = ["Saturday","Sunday","Monday","Tuesday","Wednesday","Thursday"];
         dayVal = genericDays[i % 6];
+        menuHtml = '<span class="menu-line">Menu update soon</span>';
       }
 
       let dateDisplay = "";
@@ -950,6 +984,8 @@
       else if (monthVal) dateDisplay = escapeText(monthVal);
       else if (dateVal)  dateDisplay = escapeText(dateVal);
       const safeDay = escapeText(dayVal);
+      // Human-readable date label for TTS (e.g. "June 14")
+      const dateTextForSpeech = dateDisplay.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
 
       const flipCard = document.createElement('div');
       flipCard.className = 'flip-card';
@@ -990,6 +1026,7 @@
       // Capture loop vars for closures
       const cardIdx  = i;
       const cardDay  = dayVal;
+      const cardDate = dateTextForSpeech;
       const cardMenu = menuRaw;
 
       const speakBtn = flipCard.querySelector('.speak-btn');
@@ -997,7 +1034,7 @@
       // Speak button — direct user gesture, works on all browsers/mobile
       speakBtn.addEventListener('click', function(e) {
         e.stopPropagation();   // don't flip the card
-        handleSpeakTap(cardIdx, cardDay, cardMenu, this, flipCard);
+        handleSpeakTap(cardIdx, cardDay, cardDate, cardMenu, this, flipCard);
       });
 
       // Card click (anywhere except speak button) → flip
